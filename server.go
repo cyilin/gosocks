@@ -15,7 +15,7 @@ const (
 )
 
 type Handler interface {
-	ServeSocks(conn *SocksConn)
+	ServeSocks(server *Server, conn *SocksConn)
 	Quit()
 }
 
@@ -24,12 +24,16 @@ type ServerAuthenticator interface {
 }
 
 type Server struct {
-	addr    string
-	timeout time.Duration
-	handler Handler
-	auth    ServerAuthenticator
-	msgCh   chan interface{}
-	quit    chan bool
+	addr              string
+	timeout           time.Duration
+	handler           Handler
+	auth              ServerAuthenticator
+	msgCh             chan interface{}
+	quit              chan bool
+	Dial              func(network, address string, t time.Duration) (net.Conn, error)
+	AllowConnect      bool
+	AllowUDPAssociate bool
+	AllowBind         bool
 }
 
 type UDPPacket struct {
@@ -46,6 +50,8 @@ func (svr *Server) ListenAndServe() error {
 	if err != nil {
 		return err
 	}
+	log.SetFlags(log.LstdFlags + log.LUTC + log.Lmicroseconds)
+	log.Printf("Listening on %s", ln.Addr())
 	defer ln.Close()
 	return svr.Serve(ln)
 }
@@ -126,7 +132,7 @@ func (svr *Server) Serve(ln net.Listener) error {
 						return
 					}
 				}
-				handler.ServeSocks(socks)
+				handler.ServeSocks(svr, socks)
 			}(r.conn, svr.timeout, svr.auth, svr.handler)
 		case msg := <-svr.msgCh:
 			switch msg.(type) {
@@ -156,7 +162,7 @@ func (a *AnonymousServerAuthenticator) ServerAuthenticate(conn *SocksConn) (err 
 	}
 
 	n := int(h[1])
-	_, err = io.ReadFull(r, h[2:(2+n)])
+	_, err = io.ReadFull(r, h[2:(2 + n)])
 	if err != nil {
 		return
 	}
@@ -181,10 +187,10 @@ func (a *AnonymousServerAuthenticator) ServerAuthenticate(conn *SocksConn) (err 
 
 type BasicSocksHandler struct{}
 
-func (h *BasicSocksHandler) HandleCmdConnect(req *SocksRequest, conn *SocksConn) {
+func (h *BasicSocksHandler) HandleCmdConnect(server *Server, req *SocksRequest, conn *SocksConn) {
 	addr := SockAddrString(req.DstHost, req.DstPort)
-	log.Printf("connect: %s", addr)
-	remote, err := net.DialTimeout("tcp", addr, conn.Timeout)
+	log.Printf("[%s] connect: %s", conn.RemoteAddr(), addr)
+	remote, err := server.Dial("tcp", addr, conn.Timeout)
 	if err != nil {
 		log.Printf("error in connecting remote target %s: %s", addr, err)
 		ReplyGeneralFailure(conn, req)
@@ -193,6 +199,7 @@ func (h *BasicSocksHandler) HandleCmdConnect(req *SocksRequest, conn *SocksConn)
 	}
 
 	localAddr := remote.LocalAddr()
+	log.Printf("[%s] success: %s->%s[%s]", conn.RemoteAddr(), localAddr, addr, remote.RemoteAddr())
 	hostType, host, port := NetAddrToSocksAddr(localAddr)
 	conn.SetWriteDeadline(time.Now().Add(conn.Timeout))
 	_, err = WriteSocksReply(conn, &SocksReply{SocksSucceeded, hostType, host, port})
@@ -204,10 +211,10 @@ func (h *BasicSocksHandler) HandleCmdConnect(req *SocksRequest, conn *SocksConn)
 	}
 
 	CopyLoopTimeout(conn, remote, conn.Timeout)
-	log.Printf("TCP connection done")
+	log.Printf("[%s][%s] TCP connection done", conn.RemoteAddr(), addr)
 }
 
-func (h *BasicSocksHandler) UDPAssociateFirstPacket(req *SocksRequest, conn *SocksConn) (*net.UDPConn, *net.UDPAddr, *UDPRequest, *net.UDPAddr, error) {
+func (h *BasicSocksHandler) UDPAssociateFirstPacket(server *Server, req *SocksRequest, conn *SocksConn) (*net.UDPConn, *net.UDPAddr, *UDPRequest, *net.UDPAddr, error) {
 	log.Printf("udp associate: %s:%d", req.DstHost, req.DstPort)
 	socksAddr := conn.LocalAddr().(*net.TCPAddr)
 	// create one UDP to recv/send packets from client
@@ -269,7 +276,7 @@ loop:
 	return clientBind, clientAssociate, udpReq, clientAddr, nil
 }
 
-func (h *BasicSocksHandler) UDPAssociateForwarding(conn *SocksConn, clientBind *net.UDPConn, clientAssociate *net.UDPAddr, firstPkt *UDPRequest, clientAddr *net.UDPAddr) {
+func (h *BasicSocksHandler) UDPAssociateForwarding(server *Server, conn *SocksConn, clientBind *net.UDPConn, clientAssociate *net.UDPAddr, firstPkt *UDPRequest, clientAddr *net.UDPAddr) {
 	forwardingAddr := SocksAddrToNetAddr("udp", firstPkt.DstHost, firstPkt.DstPort).(*net.UDPAddr)
 	c, err := net.DialUDP("udp", nil, forwardingAddr)
 	if err != nil {
@@ -337,7 +344,7 @@ loop:
 				break loop
 			}
 
-		// packets from remote
+			// packets from remote
 		case pkt, ok := <-chRemoteUDP:
 			t.Stop()
 			if !ok {
@@ -374,13 +381,13 @@ loop:
 	<-chRemoteUDP
 }
 
-func (h *BasicSocksHandler) HandleCmdUDPAssociate(req *SocksRequest, conn *SocksConn) {
-	clientBind, clientAssociate, udpReq, clientAddr, err := h.UDPAssociateFirstPacket(req, conn)
+func (h *BasicSocksHandler) HandleCmdUDPAssociate(server *Server, req *SocksRequest, conn *SocksConn) {
+	clientBind, clientAssociate, udpReq, clientAddr, err := h.UDPAssociateFirstPacket(server, req, conn)
 	if err != nil {
 		conn.Close()
 		return
 	}
-	h.UDPAssociateForwarding(conn, clientBind, clientAssociate, udpReq, clientAddr)
+	h.UDPAssociateForwarding(server, conn, clientBind, clientAssociate, udpReq, clientAddr)
 	log.Printf("UDP connection done")
 }
 
@@ -451,20 +458,24 @@ func CopyLoopTimeout(c1 net.Conn, c2 net.Conn, timeout time.Duration) {
 
 func (h *BasicSocksHandler) Quit() {}
 
-func (h *BasicSocksHandler) ServeSocks(conn *SocksConn) {
+func (h *BasicSocksHandler) ServeSocks(server *Server, conn *SocksConn) {
 	conn.SetReadDeadline(time.Now().Add(conn.Timeout))
 	req, err := ReadSocksRequest(conn)
 	if err != nil {
-		log.Printf("error in ReadSocksRequest: %s", err)
+		log.Printf("[%s] error in ReadSocksRequest: %s", conn.RemoteAddr().String(), err)
 		return
 	}
 
 	switch req.Cmd {
 	case SocksCmdConnect:
-		h.HandleCmdConnect(req, conn)
+		if server.AllowConnect {
+			h.HandleCmdConnect(server, req, conn)
+		}
 		return
 	case SocksCmdUDPAssociate:
-		h.HandleCmdUDPAssociate(req, conn)
+		if server.AllowUDPAssociate {
+			h.HandleCmdUDPAssociate(server, req, conn)
+		}
 		return
 	case SocksCmdBind:
 		conn.Close()
