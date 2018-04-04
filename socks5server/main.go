@@ -171,7 +171,7 @@ func LookupHostname(host string, rtype uint16) (net.IP, error) {
 			if Debug {
 				log.Printf(answer.String())
 			}
-			if rtype == answer.Header().Rrtype {
+			if rtype == dns.TypeA && answer.Header().Rrtype == dns.TypeA {
 				record := answer.(*dns.A)
 				HostnameCache[host] = DnsCacheEntity{record: answer, exp: time.Now().Add(time.Second * time.Duration(record.Header().Ttl))}
 				ipAddress = record.A
