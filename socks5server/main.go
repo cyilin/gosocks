@@ -8,6 +8,7 @@ import (
 	"flag"
 	"github.com/cyilin/gosocks"
 	"github.com/miekg/dns"
+	"sync"
 )
 
 var (
@@ -20,17 +21,19 @@ var (
 	EnableConnect   bool
 	EnableBind      bool
 	EnableAssociate bool
-	HostnameCache   map[string]DnsCacheEntity
+	DnsCache        DnsCacheMap
 	SourceIP        net.IP
 )
 
-type DnsCacheEntity struct {
+type DnsCacheMap struct {
+	sync.Map
+}
+type DnsRecord struct {
 	exp    time.Time
 	record dns.RR
 }
 
 func main() {
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	flag.StringVar(&ListenAddress, "listen", "[::]:1080", "Listen address")
 	flag.StringVar(&InterfaceName, "interface", "", "Use network interface for outbound traffic")
 	flag.BoolVar(&Debug, "debug", false, "Show debug info")
@@ -43,6 +46,7 @@ func main() {
 	} else {
 		IPv6 = false
 	}
+	DnsCache = DnsCacheMap{}
 	server := gosocks.NewBasicServer(ListenAddress, time.Minute)
 	server.AllowConnect = true
 	server.AllowBind = false
@@ -133,18 +137,15 @@ func GetIPByInterfaceName(name string) (net.IP, error) {
 	return nil, errors.New("No IP address available.")
 }
 func LookupHostname(host string, rtype uint16) (net.IP, error) {
-	if HostnameCache == nil {
-		HostnameCache = make(map[string]DnsCacheEntity)
-	}
 	if Debug {
 		log.Printf("lookup: " + host)
 	}
-	cache, exist := HostnameCache[host]
-	if exist && cache.exp.After(time.Now()) {
+	cache, exist := DnsCache.Load(host)
+	if exist && cache.(DnsRecord).exp.After(time.Now()) {
 		if Debug {
-			log.Printf("cached: " + cache.record.String() + " " + cache.exp.String())
+			log.Printf("cached: " + cache.(DnsRecord).record.String() + " " + cache.(DnsRecord).exp.String())
 		}
-		return getIPFromRecord(cache.record, rtype), nil
+		return getIPFromRecord(cache.(DnsRecord).record, rtype), nil
 	}
 	client := dns.Client{Net: "udp",
 		Dialer: &net.Dialer{DualStack: false,
@@ -173,12 +174,12 @@ func LookupHostname(host string, rtype uint16) (net.IP, error) {
 			}
 			if rtype == dns.TypeA && answer.Header().Rrtype == dns.TypeA {
 				record := answer.(*dns.A)
-				HostnameCache[host] = DnsCacheEntity{record: answer, exp: time.Now().Add(time.Second * time.Duration(record.Header().Ttl))}
+				DnsCache.Store(host, DnsRecord{record: answer, exp: time.Now().Add(time.Second * time.Duration(record.Header().Ttl))})
 				ipAddress = record.A
 				break
 			} else if rtype == dns.TypeAAAA && answer.Header().Rrtype == dns.TypeAAAA {
 				record := answer.(*dns.AAAA)
-				HostnameCache[host] = DnsCacheEntity{record: answer, exp: time.Now().Add(time.Second * time.Duration(record.Header().Ttl))}
+				DnsCache.Store(host, DnsRecord{record: answer, exp: time.Now().Add(time.Second * time.Duration(record.Header().Ttl))})
 				ipAddress = record.AAAA
 				break
 			}
