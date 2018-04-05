@@ -152,11 +152,14 @@ func LookupHostname(host string, rtype uint16) (net.IP, error) {
 		}
 		return getIPFromRecord(cache.(DnsRecord).record, rtype), nil
 	}
-	client := dns.Client{Net: "udp",
-		Dialer: &net.Dialer{DualStack: false,
+	client := dns.Client{Net: "udp"}
+	dnsIp := net.ParseIP(DnsServer)
+	if (dnsIp == nil || !dnsIp.IsLoopback()) {
+		client.Dialer = &net.Dialer{DualStack: false,
 			LocalAddr: &net.UDPAddr{
 				IP: SourceIP,
-			}}}
+			}}
+	}
 	msg := dns.Msg{}
 	if IPv4 {
 		msg.SetQuestion(host+".", dns.TypeA)
