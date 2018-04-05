@@ -23,6 +23,7 @@ var (
 	EnableAssociate bool
 	DnsCache        DnsCacheMap
 	SourceIP        net.IP
+	ForwardTo       string
 )
 
 type DnsCacheMap struct {
@@ -40,6 +41,7 @@ func main() {
 	flag.BoolVar(&IPv6, "6", false, "Use IPv6 address")
 	flag.BoolVar(&IPv4, "4", true, "Use IPv4 address")
 	flag.StringVar(&DnsServer, "dns", "", "DNS server")
+	flag.StringVar(&ForwardTo, "forward", "", "Forward request to target host:port")
 	flag.Parse()
 	if IPv6 {
 		IPv4 = false
@@ -87,6 +89,9 @@ func newDialFromIP(network, address string, timeout time.Duration) (net.Conn, er
 			IP: SourceIP},
 		Timeout:   timeout,
 		DualStack: false,
+	}
+	if (ForwardTo != "") {
+		return d.Dial(network, ForwardTo)
 	}
 
 	if DnsServer != "" {
