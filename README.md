@@ -18,6 +18,8 @@ go install
 socks5server -4 -listen="[::]:1090" -interface="本地连接 2" -dns="114.114.114.114"
 #IPv6
 socks5server -6 -listen="[::]:1095" -interface="本地连接 2" -dns="[2001:4860:4860::8844]"
+#TCP DNS
+socks5server -4 -listen="[::]:1091" -interface="本地连接 3" -dns="tcp://8.8.8.8:53"
 ```
 
 ##### Thanks
