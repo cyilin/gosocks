@@ -1,15 +1,18 @@
 package main
 
 import (
-	"time"
-	"net"
+	"context"
 	"errors"
-	"log"
 	"flag"
 	"github.com/cyilin/gosocks"
 	"github.com/miekg/dns"
-	"sync"
+	"io/ioutil"
+	"log"
+	"net"
+	"net/http"
 	"strings"
+	"sync"
+	"time"
 )
 
 var (
@@ -25,6 +28,7 @@ var (
 	DnsCache        DnsCacheMap
 	SourceIP        net.IP
 	ForwardTo       string
+	ShowMyIP        bool
 )
 
 type DnsCacheMap struct {
@@ -43,6 +47,7 @@ func main() {
 	flag.BoolVar(&IPv4, "4", true, "Use IPv4 address")
 	flag.StringVar(&DnsServer, "dns", "", "DNS server")
 	flag.StringVar(&ForwardTo, "forward", "", "Forward request to target host:port")
+	flag.BoolVar(&ShowMyIP, "myip", false, "Show external IP (use whatismyip.akamai.com API)")
 	flag.Parse()
 	if IPv6 {
 		IPv4 = false
@@ -65,6 +70,9 @@ func main() {
 		updateSourceIP()
 	} else {
 		server.Dial = net.DialTimeout
+	}
+	if ShowMyIP {
+		showMyIP()
 	}
 	err := server.ListenAndServe()
 	if err != nil {
@@ -91,7 +99,7 @@ func newDialFromIP(network, address string, timeout time.Duration) (net.Conn, er
 		Timeout:   timeout,
 		DualStack: false,
 	}
-	if (ForwardTo != "") {
+	if ForwardTo != "" {
 		return d.Dial(network, ForwardTo)
 	}
 
@@ -224,5 +232,55 @@ func getIPFromRecord(rr dns.RR, rtype uint16) net.IP {
 	} else {
 		record := rr.(*dns.AAAA)
 		return record.AAAA
+	}
+}
+
+func showMyIP() {
+	/*
+		var ip net.IP = nil
+		var err error = nil
+		if IPv4 {
+			ip, err = LookupHostname("whoami.akamai.com", dns.TypeA)
+		} else {
+			ip, err = LookupHostname("whoami.akamai.com", dns.TypeAAAA)
+		}
+		if err == nil {
+			log.Printf("External IP (via DNS): " + ip.String())
+		} else {
+			log.Printf(err.Error())
+		}
+	*/
+	url := "http://whatismyip.akamai.com/advanced"
+	if IPv6 {
+		url = "http://ipv6.whatismyip.akamai.com/advanced"
+	}
+	log.Printf("try get IP info from %s", url)
+	tr := &http.Transport{}
+	if InterfaceName != "" {
+		tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return newDialFromIP(network, addr, time.Duration(time.Second*10))
+		}
+	}
+	client := &http.Client{Transport: tr}
+	req, err := http.NewRequest("GET", url, nil)
+	req.Header.Add("User-Agent", "curl/7.59.0")
+	req.Header.Add("Accept", "*/*")
+	req.Header.Del("Accept-Encoding")
+	res, err := client.Do(req)
+	if err == nil && res.StatusCode == 200 {
+		bytes, err := ioutil.ReadAll(res.Body)
+		if err == nil {
+			html := string(bytes)
+			lines := strings.Split(html, "<br>")
+			for _, str := range lines {
+				if strings.HasPrefix(str, "Client Time: ") {
+					return
+				} else if strings.Contains(str, ": ") {
+					log.Printf(str)
+				}
+			}
+		}
+	} else {
+		log.Printf(err.Error())
 	}
 }
