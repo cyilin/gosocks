@@ -9,6 +9,7 @@ import (
 	"github.com/cyilin/gosocks"
 	"github.com/miekg/dns"
 	"sync"
+	"strings"
 )
 
 var (
@@ -152,13 +153,25 @@ func LookupHostname(host string, rtype uint16) (net.IP, error) {
 		}
 		return getIPFromRecord(cache.(DnsRecord).record, rtype), nil
 	}
-	client := dns.Client{Net: "udp"}
-	dnsIp := net.ParseIP(DnsServer)
-	if (dnsIp == nil || !dnsIp.IsLoopback()) {
-		client.Dialer = &net.Dialer{DualStack: false,
-			LocalAddr: &net.UDPAddr{
-				IP: SourceIP,
-			}}
+	scheme, dnsHost := "udp", DnsServer
+	if strings.Contains(DnsServer, "://") {
+		s := strings.Split(DnsServer, "://")
+		if len(s) == 2 {
+			scheme = s[0]
+			dnsHost = s[1]
+		} else {
+			return nil, errors.New("Invalid DNS address")
+		}
+	}
+	client := dns.Client{Net: scheme}
+	dnsIp := net.ParseIP(dnsHost)
+	if dnsIp == nil || !dnsIp.IsLoopback() {
+		client.Dialer = &net.Dialer{DualStack: false}
+		if strings.Contains(scheme, "tcp") {
+			client.Dialer.LocalAddr = &net.TCPAddr{IP: SourceIP}
+		} else {
+			client.Dialer.LocalAddr = &net.UDPAddr{IP: SourceIP}
+		}
 	}
 	msg := dns.Msg{}
 	if IPv4 {
@@ -166,7 +179,10 @@ func LookupHostname(host string, rtype uint16) (net.IP, error) {
 	} else {
 		msg.SetQuestion(host+".", dns.TypeAAAA)
 	}
-	result, duration, err := client.Exchange(&msg, DnsServer+":53")
+	if (IPv4 && !strings.Contains(dnsHost, ":")) || (IPv6 && !strings.Contains(dnsHost, "]:")) {
+		dnsHost = dnsHost + ":53"
+	}
+	result, duration, err := client.Exchange(&msg, dnsHost)
 	if err != nil {
 		log.Printf(err.Error())
 		return nil, err
